@@ -3,6 +3,7 @@ import { signOut } from "firebase/auth";
 import { useNavigate } from "react-router-dom";
 import { auth } from "../lib/firebase";
 import { connectBreathDevice } from "../lib/ble";
+import { getFirestore, collection, addDoc, serverTimestamp } from "firebase/firestore";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 interface Metric {
