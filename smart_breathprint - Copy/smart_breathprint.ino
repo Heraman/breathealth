@@ -1,161 +1,96 @@
-#include <EEPROM.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
-// BLE
 BLECharacteristic *pCharacteristic;
 bool deviceConnected = false;
 
-// UUID (bebas)
+// UUID harus sama dengan app kamu
 #define SERVICE_UUID        "12345678-1234-1234-1234-1234567890ab"
 #define CHARACTERISTIC_UUID "abcd1234-5678-1234-5678-abcdef123456"
 
-// TCS3200
-const int TCS_OUT = 2;
-const int TCS_S0 = 18;
-const int TCS_S1 = 19;
-const int TCS_S2 = 5;
-const int TCS_S3 = 21;
+unsigned long lastSend = 0;
 
-const int LED_PIN = 23;
-
-// RGB raw
-unsigned long r, g, b;
-
-// RGB calibrated (0–255)
-int rCal, gCal, bCal;
-
-// Kalibrasi min/max
-unsigned long rMin=99999, rMax=0;
-unsigned long gMin=99999, gMax=0;
-unsigned long bMin=99999, bMax=0;
-
+int rCal = 0;
+int gCal = 0;
+int bCal = 0;
 String statusText = "Normal";
-int level = 0;
 
-unsigned long lastRead = 0;
-
-// ================= CB =================
-class MyServerCallbacks: public BLEServerCallbacks {
+class MyServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     deviceConnected = true;
+    Serial.println("APP CONNECTED");
   }
+
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
+    Serial.println("APP DISCONNECTED");
+
+    // biar bisa connect lagi setelah putus
+    BLEDevice::startAdvertising();
   }
 };
 
-// ================= SETUP =================
 void setup() {
   Serial.begin(115200);
 
-  // Sensor setup
-  pinMode(TCS_OUT, INPUT);
-  pinMode(TCS_S0, OUTPUT);
-  pinMode(TCS_S1, OUTPUT);
-  pinMode(TCS_S2, OUTPUT);
-  pinMode(TCS_S3, OUTPUT);
-
-  digitalWrite(TCS_S0, HIGH);
-  digitalWrite(TCS_S1, HIGH);
-
-  pinMode(LED_PIN, OUTPUT);
-
-  // nama gw siapa
   BLEDevice::init("SmartBreathprint");
+
   BLEServer *pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
 
   BLEService *pService = pServer->createService(SERVICE_UUID);
+
   pCharacteristic = pService->createCharacteristic(
-                      CHARACTERISTIC_UUID,
-                      BLECharacteristic::PROPERTY_NOTIFY
-                    );
+    CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
 
   pCharacteristic->addDescriptor(new BLE2902());
+
   pService->start();
 
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->start();
 
-  Serial.println("BLE READY - CONNECT VIA APP");
+  Serial.println("BLE DUMMY READY - CONNECT VIA APP");
 }
-
 
 void loop() {
+  if (millis() - lastSend > 1000) {
+    lastSend = millis();
 
-  if (millis() - lastRead > 1000) {
-    lastRead = millis();
-
-    readRGB();
-    calibrateRGB();
-    level = analyzeColor();
-    statusText = getStatus(level);
-
+    generateDummyData();
     sendBLE();
     printData();
-    updateLED(level);
   }
 }
 
+void generateDummyData() {
+  rCal = random(0, 256);
+  gCal = random(0, 256);
+  bCal = random(0, 256);
 
-void readRGB() {
-  // RED r
-  digitalWrite(TCS_S2, LOW);
-  digitalWrite(TCS_S3, LOW);
-  r = pulseIn(TCS_OUT, LOW);
+  int level = random(0, 4);
 
-  // GREEN g
-  digitalWrite(TCS_S2, HIGH);
-  digitalWrite(TCS_S3, HIGH);
-  g = pulseIn(TCS_OUT, LOW);
-
-  // BLUE b
-  digitalWrite(TCS_S2, HIGH);
-  digitalWrite(TCS_S3, LOW);
-  b = pulseIn(TCS_OUT, LOW);
-}
-
-// ================= MENGHITUNG SEBANYAK 19jt =================
-void calibrateRGB() {
-  
-  rMin = min(rMin, r);
-  rMax = max(rMax, r);
-
-  gMin = min(gMin, g);
-  gMax = max(gMax, g);
-
-  bMin = min(bMin, b);
-  bMax = max(bMax, b);
-
-  // normalize ke 0-255
-  rCal = map(r, rMin, rMax, 255, 0);
-  gCal = map(g, gMin, gMax, 255, 0);
-  bCal = map(b, bMin, bMax, 255, 0);
-}
-
-// ================= Kalibrasi disini kalau sensor mendeteksi fufufafa =================
-int analyzeColor() {
-
-  if (rCal > gCal && rCal > bCal) return 2; // merah dominan
-  else if (gCal > rCal && gCal > bCal) return 0;
-  else if (bCal > rCal && bCal > gCal) return 1;
-  else return 3;
-}
-
-// ================= KET =================
-String getStatus(int lvl) {
-  switch(lvl) {
-    case 1: return "Normal";
-    case 0: return "Mild";
-    case 2: return "Stressed";
-    default: return "Weak";
+  switch (level) {
+    case 0:
+      statusText = "Mild";
+      break;
+    case 1:
+      statusText = "Normal";
+      break;
+    case 2:
+      statusText = "Stressed";
+      break;
+    default:
+      statusText = "Weak";
+      break;
   }
 }
 
-// ================= BLE SEND =================
 void sendBLE() {
   if (deviceConnected) {
     String data = "R:" + String(rCal) +
@@ -168,7 +103,6 @@ void sendBLE() {
   }
 }
 
-// ================= DEBUG =================
 void printData() {
   Serial.print("R:");
   Serial.print(rCal);

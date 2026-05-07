@@ -11,7 +11,7 @@ export async function connectBreathDevice(
   const device = await navigator.bluetooth.requestDevice({
     filters: [
       {
-        namePrefix: "BREATHEALTH",
+        namePrefix: "SmartBreathprint",
       },
     ],
     optionalServices: [SERVICE_UUID],
