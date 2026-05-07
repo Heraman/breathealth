@@ -1,4 +1,4 @@
-const SERVICE_UUID = "12345678-1234-1234-1234-123456789abc";
+const SERVICE_UUID = "12345678-1234-1234-1234-1234567890ab";
 const CHAR_UUID = "abcd1234-5678-1234-5678-abcdef123456";
 
 export async function connectBreathDevice(
