@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import { signOut } from "firebase/auth";
 import { useNavigate } from "react-router-dom";
-import { auth } from "../lib/firebase"; // sesuaikan path firebase config kamu
+import { auth } from "../lib/firebase";
+import { connectBreathDevice } from "../lib/ble";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 interface Metric {
@@ -69,6 +70,37 @@ export default function Dashboard() {
   const firstName = user?.displayName?.split(" ")[0] ?? "User";
   const greeting = now.getHours() < 12 ? "Pagi" : now.getHours() < 17 ? "Sore" : "Malam";
 
+  const [bleStatus, setBleStatus] = useState<string>("Disconnected");
+  const [sensorData, setSensorData] = useState({ r: 0, g: 0, b: 0, status: "Unknown" });
+  const [rawBleData, setRawBleData] = useState<string>("");
+
+  // 2. Fungsi untuk koneksi ke ESP32
+  const handleConnect = async () => {
+    try {
+      setBleStatus("Connecting...");
+      await connectBreathDevice((dataStr) => {
+        // dataStr berisi string dari ESP32, contoh: "R:255 G:100 B:50 -> Normal"
+        setRawBleData(dataStr); 
+        
+        // (Opsional) Memecah/Parsing string untuk mengambil nilai R, G, B, dan Status
+        const match = dataStr.match(/R:(\d+)\s+G:(\d+)\s+B:(\d+)\s+->\s+(.*)/);
+        if (match) {
+          setSensorData({
+            r: parseInt(match[1]),
+            g: parseInt(match[2]),
+            b: parseInt(match[3]),
+            status: match[4]
+          });
+        }
+      });
+      setBleStatus("Connected");
+    } catch (error: any) {
+      console.error(error);
+      setBleStatus("Failed to connect");
+      alert(error.message);
+    }
+  };
+
   return (
     <div className="db-root">
       {/* ── Sidebar ── */}
@@ -125,7 +157,25 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="header-right">
-            <div className="health-badge normal">● Healthy</div>
+            {/* Tombol Connect BLE */}
+            <button 
+              onClick={handleConnect} 
+              style={{
+                padding: "0.5rem 1rem", 
+                borderRadius: "8px", 
+                border: "none", 
+                background: bleStatus === "Connected" ? "#10b981" : "#0e7a8a", 
+                color: "white", 
+                cursor: "pointer",
+                fontWeight: "bold"
+              }}
+            >
+              {bleStatus === "Connected" ? "Bluetooth Connected" : "Connect Device"}
+            </button>
+            
+            <div className={`health-badge ${sensorData.status === 'Normal' ? 'normal' : 'warning'}`}>
+              ● {sensorData.status}
+            </div>
             <button className="icon-btn" aria-label="Notifications">🔔</button>
           </div>
         </header>
@@ -154,6 +204,36 @@ export default function Dashboard() {
 
         {/* ── Charts + Alerts row ── */}
         <section className="content-row">
+          {/* ── Sensor Data Card ── */}
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <h3>Live Sensor Data</h3>
+                <p className="card-sub">Data dari SmartBreathprint</p>
+              </div>
+            </div>
+            
+            <div style={{ marginTop: "1rem" }}>
+              <p><strong>Raw Data:</strong> {rawBleData || "Belum ada data"}</p>
+              <div style={{ display: "flex", gap: "1rem", marginTop: "1rem" }}>
+                <div style={{ padding: "1rem", background: "#fee2e2", borderRadius: "8px", flex: 1, textAlign: "center" }}>
+                  <h4 style={{ color: "#ef4444" }}>RED</h4>
+                  <h2>{sensorData.r}</h2>
+                </div>
+                <div style={{ padding: "1rem", background: "#dcfce7", borderRadius: "8px", flex: 1, textAlign: "center" }}>
+                  <h4 style={{ color: "#22c55e" }}>GREEN</h4>
+                  <h2>{sensorData.g}</h2>
+                </div>
+                <div style={{ padding: "1rem", background: "#dbeafe", borderRadius: "8px", flex: 1, textAlign: "center" }}>
+                  <h4 style={{ color: "#3b82f6" }}>BLUE</h4>
+                  <h2>{sensorData.b}</h2>
+                </div>
+              </div>
+              <h3 style={{ marginTop: "1rem", textAlign: "center", fontSize: "1.2rem" }}>
+                Status: <span style={{ color: "#0e7a8a" }}>{sensorData.status}</span>
+              </h3>
+            </div>
+          </div>
           {/* SpO₂ mini chart */}
           {/* <div className="card chart-card">
             <div className="card-header">
@@ -211,11 +291,11 @@ export default function Dashboard() {
         {/* ── Bottom row ── */}
         <section className="content-row">
           {/* Breathing exercise */}
-          <div className="card exercise-card">
+          {/* <div className="card exercise-card">
             <h3>Breathing Exercise</h3>
             <p className="card-sub">Daily guided session</p>
             <BreathingWidget />
-          </div>
+          </div> */}
 
           {/* Weekly summary */}
           {/* <div className="card summary-card">
