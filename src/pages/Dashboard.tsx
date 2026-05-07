@@ -606,6 +606,13 @@ const styles = `
     .pill-row { gap: 0.3rem; }
     .count-pill { font-size: 0.7rem; padding: 0.22rem 0.6rem; }
     .phase-badge { font-size: 0.7rem; padding: 0.25rem 0.6rem; }
-    .history-date { display: none; }
+    .history-date {
+        display: block;
+        font-size: 0.68rem;
+    }
+
+    .history-time-block {
+        align-items: flex-end;
+    }
   }
 `;
