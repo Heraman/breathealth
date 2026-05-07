@@ -30,7 +30,7 @@ export async function connectBreathDevice(
     const value = target.value;
     if (!value) return;
 
-    const text = new TextDecoder().decode(value);
+    const text = new TextDecoder().decode(value).trim();
     onData(text);
   });
 
