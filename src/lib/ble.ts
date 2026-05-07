@@ -25,7 +25,7 @@ export async function connectBreathDevice(
 
   await characteristic.startNotifications();
 
-  characteristic.addEventListener("characteristicvaluechanged", (event) => {
+  characteristic.addEventListener("characteristicvaluechanged", (event: Event) => {
     const target = event.target as BluetoothRemoteGATTCharacteristic;
     const value = target.value;
     if (!value) return;
