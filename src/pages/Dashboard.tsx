@@ -42,7 +42,7 @@ const NAV = [
   { icon: "⚙️", label: "Settings",   id: "settings" },
 ];
 
-const CHECK_DURATION = 7000;
+const CHECK_DURATION = 10000;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function formatTimestamp(ts: Timestamp | Date): { date: string; time: string } {
