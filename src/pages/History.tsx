@@ -147,7 +147,7 @@ export default function HistoryPage() {
       <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div className="sidebar-brand">
           <span className="brand-icon">🫁</span>
-          <span className="brand-name">BreaHealth</span>
+          <span className="brand-name">BreatHealth</span>
         </div>
         <nav className="sidebar-nav">
           {NAV.map((n) => (
