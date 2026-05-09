@@ -12,7 +12,7 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg}']
       },
-      developmentOptions: {
+      devOptions: {
         enabled: true
       },
       includeAssets: ['icon.png'],
