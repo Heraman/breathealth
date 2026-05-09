@@ -1,45 +1,36 @@
 import { useState, useEffect, useRef } from "react";
 import { signOut } from "firebase/auth";
 import { useNavigate } from "react-router-dom";
-import { auth } from "../lib/firebase";
+import {
+  collection,
+  addDoc,
+  query,
+  orderBy,
+  onSnapshot,
+  Timestamp,
+} from "firebase/firestore";
+import { auth, db } from "../lib/firebase";
 import { connectBreathDevice } from "../lib/ble";
-import { getFirestore, collection, addDoc, serverTimestamp } from "firebase/firestore";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-interface Metric {
-  label: string;
-  value: string;
-  unit: string;
-  status: "normal" | "warning" | "critical";
-  trend: string;
-  icon: string;
-  detail: string;
+type BreathStatus = "Mild" | "Normal" | "Stressed" | "Weak";
+type CheckPhase = "idle" | "connected" | "checking" | "done";
+
+interface HistoryEntry {
+  id?: string;
+  status: BreathStatus;
+  timestamp: Timestamp | Date;
+  counts: Record<BreathStatus, number>;
 }
 
-interface Alert {
-  id: number;
-  type: "warning" | "info" | "critical";
-  msg: string;
-  time: string;
-}
+const VALID_STATUSES: BreathStatus[] = ["Mild", "Normal", "Stressed", "Weak"];
 
-// ─── Mock Data (ganti dengan Firebase Firestore) ──────────────────────────────
-const METRICS: Metric[] = [
-  { label: "SpO₂ Level",       value: "98",  unit: "%",   status: "normal",   trend: "+0.5%", icon: "🩸", detail: "Excellent oxygen saturation" },
-  { label: "Breathing Rate",   value: "16",  unit: "/min",status: "normal",   trend: "-1",    icon: "🫁", detail: "Normal resting rate" },
-  { label: "Peak Flow",        value: "480", unit: "L/min",status: "warning", trend: "-12%",  icon: "💨", detail: "Slightly below personal best" },
-  { label: "FEV1 Score",       value: "82",  unit: "%",   status: "normal",   trend: "+2%",   icon: "📊", detail: "Predicted: 3.8L | Actual: 3.1L" },
-];
-
-const ALERTS: Alert[] = [
-  { id: 1, type: "warning", msg: "Peak flow dropped 12% from yesterday", time: "2h ago" },
-  { id: 2, type: "info",    msg: "Weekly report is ready to view",        time: "5h ago" },
-  { id: 3, type: "info",    msg: "Reminder: Log your morning reading",    time: "8h ago" },
-];
-
-// SpO₂ chart (last 12h — mock)
-const SPO2_DATA = [96, 97, 97, 98, 98, 97, 98, 99, 98, 98, 97, 98];
-const HOURS     = ["12a","2a","4a","6a","8a","10a","12p","2p","4p","6p","8p","10p"];
+const STATUS_CONFIG: Record<BreathStatus, { color: string; bg: string; icon: string; desc: string }> = {
+  Normal:   { color: "#16a34a", bg: "#dcfce7", icon: "😊", desc: "Pernapasan normal, kondisi baik" },
+  Mild:     { color: "#ca8a04", bg: "#fef9c3", icon: "😐", desc: "Sedikit tidak normal, perhatikan pola napas" },
+  Stressed: { color: "#dc2626", bg: "#fee2e2", icon: "😰", desc: "Terdeteksi stres, cobalah untuk rileks" },
+  Weak:     { color: "#7c3aed", bg: "#ede9fe", icon: "😮‍💨", desc: "Napas lemah, disarankan istirahat" },
+};
 
 // ─── Sidebar nav ──────────────────────────────────────────────────────────────
 const NAV = [
@@ -50,6 +41,16 @@ const NAV = [
   { icon: "📅", label: "Schedule",   id: "schedule" },
   { icon: "⚙️", label: "Settings",   id: "settings" },
 ];
+
+const CHECK_DURATION = 10000;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function formatTimestamp(ts: Timestamp | Date): { date: string; time: string } {
+  const d = ts instanceof Date ? ts : ts.toDate();
+  const date = d.toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" });
+  const time = d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+  return { date, time };
+}
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -71,36 +72,109 @@ export default function Dashboard() {
   const firstName = user?.displayName?.split(" ")[0] ?? "User";
   const greeting = now.getHours() < 12 ? "Pagi" : now.getHours() < 17 ? "Sore" : "Malam";
 
-  const [bleStatus, setBleStatus] = useState<string>("Disconnected");
-  const [sensorData, setSensorData] = useState({ r: 0, g: 0, b: 0, status: "Unknown" });
-  const [rawBleData, setRawBleData] = useState<string>("");
+  // ─── BLE & Check State ───────────────────────────────────────────────────────
+  const [phase, setPhase] = useState<CheckPhase>("idle");
+  const [countdown, setCountdown] = useState(0);
+  const [finalResult, setFinalResult] = useState<BreathStatus | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [saving, setSaving] = useState(false);
 
-  // 2. Fungsi untuk koneksi ke ESP32
+  const countRef = useRef<Record<BreathStatus, number>>({ Mild: 0, Normal: 0, Stressed: 0, Weak: 0 });
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ─── Firebase: Load history realtime ─────────────────────────────────────────
+  useEffect(() => {
+    if (!user) return;
+    const uid = user.uid;
+    const q = query(
+      collection(db, "users", uid, "checkHistory"),
+      orderBy("timestamp", "desc")
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      const entries: HistoryEntry[] = snap.docs.map((doc) => ({
+        id: doc.id,
+        ...(doc.data() as Omit<HistoryEntry, "id">),
+      }));
+      setHistory(entries);
+    });
+    return () => unsub();
+  }, [user]);
+
+  // ─── Connect BLE ─────────────────────────────────────────────────────────────
   const handleConnect = async () => {
+    if (phase !== "idle") return;
     try {
-      setBleStatus("Connecting...");
+      setPhase("connected");
       await connectBreathDevice((dataStr) => {
-        // dataStr berisi string dari ESP32, contoh: "R:255 G:100 B:50 -> Normal"
-        setRawBleData(dataStr); 
-        
-        // (Opsional) Memecah/Parsing string untuk mengambil nilai R, G, B, dan Status
-        const match = dataStr.match(/R:(\d+)\s+G:(\d+)\s+B:(\d+)\s+->\s+(.*)/);
-        if (match) {
-          setSensorData({
-            r: parseInt(match[1]),
-            g: parseInt(match[2]),
-            b: parseInt(match[3]),
-            status: match[4]
-          });
+        const trimmed = dataStr.trim() as BreathStatus;
+        if (VALID_STATUSES.includes(trimmed)) {
+          countRef.current[trimmed]++;
         }
       });
-      setBleStatus("Connected");
     } catch (error: any) {
       console.error(error);
-      setBleStatus("Failed to connect");
+      setPhase("idle");
       alert(error.message);
     }
   };
+
+  // ─── Mulai Pengecekan ─────────────────────────────────────────────────────────
+  const handleStartCheck = () => {
+    if (phase !== "connected") return;
+    countRef.current = { Mild: 0, Normal: 0, Stressed: 0, Weak: 0 };
+    setFinalResult(null);
+    setPhase("checking");
+    setCountdown(Math.round(CHECK_DURATION / 1000));
+
+    countdownRef.current = setInterval(() => {
+      setCountdown((c) => {
+        if (c <= 1) {
+          if (countdownRef.current) clearInterval(countdownRef.current);
+          return 0;
+        }
+        return c - 1;
+      });
+    }, 1000);
+
+    timerRef.current = setTimeout(async () => {
+      const counts = { ...countRef.current };
+      const result = (Object.keys(counts) as BreathStatus[]).reduce((a, b) =>
+        counts[a] >= counts[b] ? a : b
+      );
+      setFinalResult(result);
+      setPhase("done");
+
+      // ─── Save to Firestore ────────────────────────────────────────────────────
+      if (user) {
+        setSaving(true);
+        try {
+          await addDoc(collection(db, "users", user.uid, "checkHistory"), {
+            status: result,
+            counts,
+            timestamp: Timestamp.now(),
+          });
+        } catch (err) {
+          console.error("Gagal simpan ke Firebase:", err);
+        } finally {
+          setSaving(false);
+        }
+      }
+    }, CHECK_DURATION);
+  };
+
+  // ─── Ulangi Pengecekan ────────────────────────────────────────────────────────
+  const handleRecheck = () => {
+    setPhase("connected");
+    setFinalResult(null);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      if (countdownRef.current) clearInterval(countdownRef.current);
+    };
+  }, []);
 
   return (
     <div className="db-root">
@@ -136,7 +210,6 @@ export default function Dashboard() {
         </div>
       </aside>
 
-      {/* Overlay for mobile */}
       {sidebarOpen && <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />}
 
       {/* ── Main ── */}
@@ -147,282 +220,186 @@ export default function Dashboard() {
             <button className="hamburger" onClick={() => setSidebarOpen(true)} aria-label="Menu">☰</button>
             <div>
               <h1 className="header-title">
-                <span>{greeting},</span>
-                <span className="greeting-name">{firstName} 👋</span>
+                <span>Selamat {greeting},</span>
+                <span className="greeting-name"> {firstName} 👋</span>
               </h1>
-              {/* <h1 className="header-title">{firstName} 👋</h1> */}
-              {/* <br></br> */}
               <p className="header-sub">
-                {now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+                {now.toLocaleDateString("id-ID", { weekday: "long", month: "long", day: "numeric" })}
               </p>
             </div>
           </div>
-          <div className="header-right">
-            {/* Tombol Connect BLE */}
-            <button 
-              onClick={handleConnect} 
-              style={{
-                padding: "0.5rem 1rem", 
-                borderRadius: "8px", 
-                border: "none", 
-                background: bleStatus === "Connected" ? "#10b981" : "#0e7a8a", 
-                color: "white", 
-                cursor: "pointer",
-                fontWeight: "bold"
-              }}
-            >
-              {bleStatus === "Connected" ? "Bluetooth Connected" : "Connect Device"}
-            </button>
-            
-            <div className={`health-badge ${sensorData.status === 'Normal' ? 'normal' : 'warning'}`}>
-              ● {sensorData.status}
-            </div>
-            <button className="icon-btn" aria-label="Notifications">🔔</button>
-          </div>
         </header>
 
-        {/* ── Metric cards ── */}
-        {/* <section className="metrics-grid">
-          {METRICS.map((m) => (
-            <div key={m.label} className={`metric-card ${m.status}`}>
-              <div className="metric-top">
-                <span className="metric-icon">{m.icon}</span>
-                <span className={`status-dot ${m.status}`} />
-              </div>
-              <div className="metric-value">
-                {m.value}<span className="metric-unit">{m.unit}</span>
-              </div>
-              <div className="metric-label">{m.label}</div>
-              <div className="metric-bottom">
-                <span className="metric-detail">{m.detail}</span>
-                <span className={`metric-trend ${m.trend.startsWith("+") ? "up" : "down"}`}>
-                  {m.trend.startsWith("+") ? "↑" : "↓"} {m.trend.replace(/[+-]/, "")}
-                </span>
-              </div>
-            </div>
-          ))}
-        </section> */}
+        <section className="content-col">
 
-        {/* ── Charts + Alerts row ── */}
-        <section className="content-row">
-          {/* ── Sensor Data Card ── */}
+          {/* ── Sensor Card ── */}
+          <div className="card sensor-card">
+            <div className="card-header">
+              <div>
+                <h3>🫁 Pengecekan Napas</h3>
+                <p className="card-sub">SmartBreathprint via Bluetooth</p>
+              </div>
+
+              {/* Status badge di header card */}
+              {phase === "connected" && (
+                <span className="phase-badge connected">● Terhubung</span>
+              )}
+              {phase === "checking" && (
+                <span className="phase-badge checking">⏳ {countdown}s</span>
+              )}
+              {phase === "done" && finalResult && (
+                <span
+                  className="phase-badge"
+                  style={{ background: STATUS_CONFIG[finalResult].bg, color: STATUS_CONFIG[finalResult].color }}
+                >
+                  ● {finalResult}
+                </span>
+              )}
+            </div>
+
+            {/* State: Idle */}
+            {phase === "idle" && (
+              <div className="state-box">
+                <div className="state-icon">📡</div>
+                <p className="state-title">Belum Terhubung</p>
+                <p className="state-desc">Hubungkan SmartBreathprint via Bluetooth untuk memulai pengecekan.</p>
+                <button className="btn-action btn-connect" onClick={handleConnect}>
+                  🔗 Connect Device
+                </button>
+              </div>
+            )}
+
+            {/* State: Connected */}
+            {phase === "connected" && (
+              <div className="state-box">
+                <div className="state-icon" style={{ color: "#7c3aed" }}>✅</div>
+                <p className="state-title" style={{ color: "#7c3aed" }}>Perangkat Terhubung!</p>
+                <p className="state-desc">
+                  Tekan <strong>Mulai Pengecekan</strong> lalu bernapaslah secara normal selama {CHECK_DURATION / 1000} detik.
+                </p>
+                <button className="btn-action btn-start" onClick={handleStartCheck}>
+                  ▶ Mulai Pengecekan
+                </button>
+              </div>
+            )}
+
+            {/* State: Checking */}
+            {phase === "checking" && (
+              <div className="state-box">
+                <div className="pulse-ring">
+                  <div className="pulse-core">🫁</div>
+                </div>
+                <p className="state-title" style={{ color: "#0e7a8a" }}>Sedang Menganalisis...</p>
+                <p className="state-desc">Bernapaslah normal. Selesai dalam <strong>{countdown} detik</strong>.</p>
+                <div className="pill-row">
+                  {(["Normal", "Mild", "Stressed", "Weak"] as BreathStatus[]).map((s) => (
+                    <div key={s} className="count-pill" style={{ background: STATUS_CONFIG[s].bg, color: STATUS_CONFIG[s].color }}>
+                      {s}: {countRef.current[s]}x
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* State: Done */}
+            {phase === "done" && finalResult && (
+              <div className="result-box" style={{ background: STATUS_CONFIG[finalResult].bg }}>
+                <div className="result-icon">{STATUS_CONFIG[finalResult].icon}</div>
+                <div className="result-label" style={{ color: STATUS_CONFIG[finalResult].color }}>
+                  Hasil: {finalResult}
+                </div>
+                <p className="result-desc" style={{ color: STATUS_CONFIG[finalResult].color }}>
+                  {STATUS_CONFIG[finalResult].desc}
+                </p>
+                <div className="pill-row" style={{ marginTop: "1rem" }}>
+                  {(["Normal", "Mild", "Stressed", "Weak"] as BreathStatus[]).map((s) => (
+                    <div
+                      key={s}
+                      className="count-pill"
+                      style={{
+                        background: s === finalResult ? STATUS_CONFIG[s].color : "#f1f5f9",
+                        color: s === finalResult ? "#fff" : "#64748b",
+                        fontWeight: s === finalResult ? 800 : 500,
+                      }}
+                    >
+                      {s}: {countRef.current[s]}x
+                    </div>
+                  ))}
+                </div>
+                <div className="done-actions">
+                  {saving && <span className="saving-label">💾 Menyimpan...</span>}
+                  <button className="btn-action btn-recheck" onClick={handleRecheck}>
+                    🔄 Cek Ulang
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ── History Card ── */}
           <div className="card">
             <div className="card-header">
               <div>
-                <h3>Live Sensor Data</h3>
-                <p className="card-sub">Data dari SmartBreathprint</p>
+                <h3>📋 Riwayat Pengecekan</h3>
+                <p className="card-sub">
+                  {history.length === 0 ? "Belum ada data" : `${history.length} hasil tersimpan`}
+                </p>
               </div>
             </div>
-            
-            <div style={{ marginTop: "1rem" }}>
-              <p><strong>Raw Data:</strong> {rawBleData || "Belum ada data"}</p>
-              <div style={{ display: "flex", gap: "1rem", marginTop: "1rem" }}>
-                <div style={{ padding: "1rem", background: "#fee2e2", borderRadius: "8px", flex: 1, textAlign: "center" }}>
-                  <h4 style={{ color: "#ef4444" }}>RED</h4>
-                  <h2>{sensorData.r}</h2>
-                </div>
-                <div style={{ padding: "1rem", background: "#dcfce7", borderRadius: "8px", flex: 1, textAlign: "center" }}>
-                  <h4 style={{ color: "#22c55e" }}>GREEN</h4>
-                  <h2>{sensorData.g}</h2>
-                </div>
-                <div style={{ padding: "1rem", background: "#dbeafe", borderRadius: "8px", flex: 1, textAlign: "center" }}>
-                  <h4 style={{ color: "#3b82f6" }}>BLUE</h4>
-                  <h2>{sensorData.b}</h2>
-                </div>
+
+            {history.length === 0 ? (
+              <div className="empty-state">
+                <span className="empty-icon">📭</span>
+                <p>Belum ada riwayat pengecekan.</p>
+                <p>Data akan muncul setelah pemeriksaan pertama.</p>
               </div>
-              <h3 style={{ marginTop: "1rem", textAlign: "center", fontSize: "1.2rem" }}>
-                Status: <span style={{ color: "#0e7a8a" }}>{sensorData.status}</span>
-              </h3>
-            </div>
+            ) : (
+              <div className="history-list">
+                {history.map((h, i) => {
+                  const { date, time } = formatTimestamp(h.timestamp);
+                  return (
+                    <div
+                      key={h.id ?? i}
+                      className="history-item"
+                      style={{ borderLeft: `4px solid ${STATUS_CONFIG[h.status].color}` }}
+                    >
+                      <span className="history-icon">{STATUS_CONFIG[h.status].icon}</span>
+                      <div className="history-info">
+                        <span className="history-status" style={{ color: STATUS_CONFIG[h.status].color }}>
+                          {h.status}
+                        </span>
+                        <span className="history-desc">{STATUS_CONFIG[h.status].desc}</span>
+                        {h.counts && (
+                          <div className="history-pills">
+                            {(["Normal", "Mild", "Stressed", "Weak"] as BreathStatus[]).map((s) => (
+                              h.counts[s] > 0 && (
+                                <span
+                                  key={s}
+                                  className="mini-pill"
+                                  style={{ background: STATUS_CONFIG[s].bg, color: STATUS_CONFIG[s].color }}
+                                >
+                                  {s}: {h.counts[s]}x
+                                </span>
+                              )
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div className="history-time-block">
+                        <span className="history-date">{date}</span>
+                        <span className="history-time">{time}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
-          {/* SpO₂ mini chart */}
-          {/* <div className="card chart-card">
-            <div className="card-header">
-              <div>
-                <h3>SpO₂ Trend</h3>
-                <p className="card-sub">Last 12 hours</p>
-              </div>
-              <select className="chart-select">
-                <option>12 Hours</option>
-                <option>24 Hours</option>
-                <option>7 Days</option>
-              </select>
-            </div>
-            <SpO2Chart data={SPO2_DATA} labels={HOURS} />
-            <div className="chart-legend">
-              <span className="legend-dot normal" />Normal range: 95–100%
-            </div>
-          </div> */}
 
-          {/* Alerts */}
-          {/* <div className="card alerts-card">
-            <div className="card-header">
-              <div>
-                <h3>Alerts</h3>
-                <p className="card-sub">{ALERTS.length} new notifications</p>
-              </div>
-              <button className="link-btn">View all</button>
-            </div>
-            <div className="alerts-list">
-              {ALERTS.map((a) => (
-                <div key={a.id} className={`alert-item ${a.type}`}>
-                  <span className="alert-icon">
-                    {a.type === "warning" ? "⚠️" : a.type === "critical" ? "🚨" : "ℹ️"}
-                  </span>
-                  <div className="alert-body">
-                    <p className="alert-msg">{a.msg}</p>
-                    <span className="alert-time">{a.time}</span>
-                  </div>
-                </div>
-              ))}
-            </div> */}
-
-            {/* Quick log */}
-            {/* <div className="quick-log">
-              <h4>Log a Reading</h4>
-              <div className="log-row">
-                <input type="number" placeholder="SpO₂ %" className="log-input" />
-                <input type="number" placeholder="Peak Flow" className="log-input" />
-                <button className="btn-log">+ Log</button>
-              </div>
-            </div>
-          </div> */}
-        </section>
-
-        {/* ── Bottom row ── */}
-        <section className="content-row">
-          {/* Breathing exercise */}
-          {/* <div className="card exercise-card">
-            <h3>Breathing Exercise</h3>
-            <p className="card-sub">Daily guided session</p>
-            <BreathingWidget />
-          </div> */}
-
-          {/* Weekly summary */}
-          {/* <div className="card summary-card">
-            <div className="card-header">
-              <div><h3>Weekly Summary</h3><p className="card-sub">Mon – Sun</p></div>
-              <button className="link-btn">Download</button>
-            </div>
-            <WeeklyBars />
-            <div className="summary-footer">
-              <div className="sf-item"><span>Avg SpO₂</span><strong>97.4%</strong></div>
-              <div className="sf-item"><span>Sessions</span><strong>14</strong></div>
-              <div className="sf-item"><span>Streak</span><strong>🔥 5 days</strong></div>
-            </div>
-          </div> */}
         </section>
       </main>
 
       <style>{styles}</style>
-    </div>
-  );
-}
-
-// ─── SpO₂ Chart (pure SVG, no lib needed) ────────────────────────────────────
-// function SpO2Chart({ data, labels }: { data: number[]; labels: string[] }) {
-//   const W = 520, H = 140;
-//   const min = 90, max = 100;
-//   const pts = data.map((v, i) => {
-//     const x = (i / (data.length - 1)) * W;
-//     const y = H - ((v - min) / (max - min)) * H;
-//     return `${x},${y}`;
-//   });
-//   const area = `0,${H} ${pts.join(" ")} ${W},${H}`;
-
-//   return (
-//     <div className="chart-wrap">
-//       <svg viewBox={`0 0 ${W} ${H + 24}`} preserveAspectRatio="xMidYMid meet">
-//         {/* Normal range band */}
-//         <rect x={0} y={0} width={W} height={H * 0.5} fill="#dcfce7" opacity={0.4} />
-//         {/* Area */}
-//         <polygon points={area} fill="url(#spo2grad)" opacity={0.3} />
-//         {/* Line */}
-//         <polyline points={pts.join(" ")} fill="none" stroke="#0e7a8a" strokeWidth={2.5} strokeLinejoin="round" />
-//         {/* Dots */}
-//         {pts.map((p, i) => {
-//           const [x, y] = p.split(",").map(Number);
-//           return <circle key={i} cx={x} cy={y} r={3} fill="#0e7a8a" />;
-//         })}
-//         {/* X labels */}
-//         {labels.map((l, i) => {
-//           if (i % 2 !== 0) return null;
-//           const x = (i / (data.length - 1)) * W;
-//           return <text key={i} x={x} y={H + 18} fontSize={9} fill="#94a3b8" textAnchor="middle">{l}</text>;
-//         })}
-//         <defs>
-//           <linearGradient id="spo2grad" x1="0" y1="0" x2="0" y2="1">
-//             <stop offset="0%" stopColor="#0e7a8a" />
-//             <stop offset="100%" stopColor="#fff" stopOpacity={0} />
-//           </linearGradient>
-//         </defs>
-//       </svg>
-//     </div>
-//   );
-// }
-
-// ─── Weekly Bars ──────────────────────────────────────────────────────────────
-// const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-// const VALS = [96, 98, 97, 99, 98, 97, 98];
-
-// function WeeklyBars() {
-//   return (
-//     <div className="weekly-bars">
-//       {DAYS.map((d, i) => (
-//         <div key={d} className="bar-col">
-//           <span className="bar-val">{VALS[i]}%</span>
-//           <div className="bar-track">
-//             <div
-//               className="bar-fill"
-//               style={{ height: `${((VALS[i] - 90) / 10) * 100}%` }}
-//             />
-//           </div>
-//           <span className="bar-label">{d}</span>
-//         </div>
-//       ))}
-//     </div>
-//   );
-// }
-
-// ─── Breathing Widget ─────────────────────────────────────────────────────────
-function BreathingWidget() {
-  const [phase, setPhase] = useState<"idle" | "inhale" | "hold" | "exhale">("idle");
-  const [count, setCount] = useState(0);
-
-  const start = () => {
-    let c = 0;
-    setCount(c);
-    setPhase("inhale");
-    const cycle = () => {
-      setPhase("inhale");
-      setTimeout(() => setPhase("hold"), 4000);
-      setTimeout(() => setPhase("exhale"), 7000);
-      setTimeout(() => {
-        c++;
-        setCount(c);
-        if (c < 3) cycle();
-        else setPhase("idle");
-      }, 11000);
-    };
-    cycle();
-  };
-
-  const labels: Record<string, string> = {
-    idle: "Start session", inhale: "Inhale…", hold: "Hold…", exhale: "Exhale…",
-  };
-  const sizes: Record<string, string> = {
-    idle: "80px", inhale: "130px", hold: "130px", exhale: "80px",
-  };
-
-  return (
-    <div className="breath-widget">
-      <div
-        className={`breath-orb ${phase}`}
-        style={{ width: sizes[phase], height: sizes[phase] }}
-      />
-      <p className="breath-phase">{labels[phase]}</p>
-      {phase === "idle" && <button className="btn-start" onClick={start}>▶ Start</button>}
-      {phase !== "idle" && <p className="breath-count">Cycle {count + 1} / 3</p>}
     </div>
   );
 }
@@ -451,313 +428,191 @@ const styles = `
     z-index: 100;
     transition: transform 0.3s;
   }
-
-  .sidebar-brand {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    margin-bottom: 2.5rem;
-    padding: 0 0.5rem;
-  }
+  .sidebar-brand { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 2.5rem; padding: 0 0.5rem; }
   .brand-icon { font-size: 1.6rem; }
   .brand-name { color: #fff; font-size: 1.2rem; font-weight: 700; }
-
   .sidebar-nav { display: flex; flex-direction: column; gap: 0.25rem; flex: 1; }
-
   .nav-item {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.7rem 0.9rem;
-    border-radius: 10px;
-    border: none;
-    background: transparent;
-    color: rgba(255,255,255,0.55);
-    font-size: 0.875rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s;
-    text-align: left;
-    width: 100%;
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.7rem 0.9rem; border-radius: 10px; border: none;
+    background: transparent; color: rgba(255,255,255,0.55);
+    font-size: 0.875rem; font-weight: 500; cursor: pointer;
+    transition: all 0.15s; text-align: left; width: 100%;
   }
   .nav-item:hover { background: rgba(255,255,255,0.07); color: #fff; }
   .nav-item.active { background: linear-gradient(135deg,#0e7a8a,#12c4a0); color: #fff; }
   .nav-icon { font-size: 1rem; width: 20px; text-align: center; }
-  .nav-label { font-size: 0.875rem; }
-
   .sidebar-footer { margin-top: auto; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,0.08); }
   .user-chip { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.8rem; }
   .user-avatar {
-    width: 36px; height: 36px;
-    border-radius: 50%;
+    width: 36px; height: 36px; border-radius: 50%;
     background: linear-gradient(135deg,#0e7a8a,#12c4a0);
-    color: #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-    font-size: 0.9rem;
-    flex-shrink: 0;
+    color: #fff; display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 0.9rem; flex-shrink: 0;
   }
   .user-name { display: block; color: #fff; font-size: 0.82rem; font-weight: 600; }
   .user-role { display: block; color: rgba(255,255,255,0.4); font-size: 0.72rem; }
-
   .btn-logout {
-    width: 100%;
-    padding: 0.5rem;
-    background: rgba(255,255,255,0.06);
-    border: none;
-    border-radius: 8px;
-    color: rgba(255,255,255,0.5);
-    font-size: 0.82rem;
-    cursor: pointer;
-    transition: background 0.15s;
+    width: 100%; padding: 0.5rem; background: rgba(255,255,255,0.06);
+    border: none; border-radius: 8px; color: rgba(255,255,255,0.5);
+    font-size: 0.82rem; cursor: pointer; transition: background 0.15s;
   }
   .btn-logout:hover { background: rgba(255,255,255,0.1); color: #fff; }
 
   /* ── MAIN ── */
-  .db-main {
-    flex: 1;
-    margin-left: 240px;
-    padding: 1.5rem;
-    min-height: 100vh;
-    max-width: 100%;
-  }
+  .db-main { flex: 1; margin-left: 240px; padding: 1.5rem; min-height: 100vh; }
 
   /* ── HEADER ── */
   .db-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    display: flex; align-items: center; justify-content: space-between;
     margin-bottom: 1.5rem;
   }
   .header-left { display: flex; align-items: center; gap: 0.75rem; }
-  .hamburger {
-    display: none;
-    background: none;
-    border: none;
-    font-size: 1.4rem;
-    cursor: pointer;
-    color: #0a2540;
-  }
-  .header-title { font-size: clamp(1.1rem,2.5vw,1.5rem); font-weight: 800; color: #0a2540; }
-  .header-sub { font-size: 0.8rem; color: #64748b; margin-top: 0.1rem; }
+  .hamburger { display: none; background: none; border: none; font-size: 1.4rem; cursor: pointer; color: #0a2540; padding: 0.25rem; }
+  .header-title { font-size: clamp(1rem, 2.5vw, 1.4rem); font-weight: 800; color: #0a2540; }
+  .greeting-name { color: #0e7a8a; }
+  .header-sub { font-size: 0.8rem; color: #64748b; margin-top: 0.15rem; }
 
-  .header-right { display: flex; align-items: center; gap: 0.75rem; }
-  .health-badge {
-    padding: 0.35rem 0.9rem;
-    border-radius: 20px;
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.2px;
-  }
-  .health-badge.normal { background: #dcfce7; color: #16a34a; }
-  .health-badge.warning { background: #fef9c3; color: #ca8a04; }
-  .icon-btn { background: #fff; border: 1.5px solid #e5e7eb; border-radius: 10px; padding: 0.5rem 0.65rem; cursor: pointer; font-size: 1rem; }
-
-  /* ── METRIC CARDS ── */
-  .metrics-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 1rem;
-    margin-bottom: 1.2rem;
-  }
-
-  .metric-card {
-    background: #fff;
-    border-radius: 16px;
-    padding: 1.25rem;
-    box-shadow: 0 1px 12px rgba(0,0,0,0.05);
-    border-top: 3px solid transparent;
-    transition: transform 0.15s;
-  }
-  .metric-card:hover { transform: translateY(-2px); }
-  .metric-card.normal  { border-top-color: #10b981; }
-  .metric-card.warning { border-top-color: #f59e0b; }
-  .metric-card.critical{ border-top-color: #ef4444; }
-
-  .metric-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.8rem; }
-  .metric-icon { font-size: 1.4rem; }
-  .status-dot { width: 8px; height: 8px; border-radius: 50%; }
-  .status-dot.normal  { background: #10b981; box-shadow: 0 0 6px #10b981; }
-  .status-dot.warning { background: #f59e0b; box-shadow: 0 0 6px #f59e0b; }
-  .status-dot.critical{ background: #ef4444; box-shadow: 0 0 6px #ef4444; }
-
-  .metric-value { font-size: 2rem; font-weight: 800; color: #0a2540; line-height: 1; }
-  .metric-unit { font-size: 0.9rem; font-weight: 500; color: #64748b; margin-left: 2px; }
-  .metric-label { font-size: 0.8rem; color: #64748b; margin: 0.25rem 0 0.7rem; }
-
-  .metric-bottom { display: flex; justify-content: space-between; align-items: center; }
-  .metric-detail { font-size: 0.7rem; color: #94a3b8; }
-  .metric-trend { font-size: 0.75rem; font-weight: 700; }
-  .metric-trend.up   { color: #10b981; }
-  .metric-trend.down { color: #f59e0b; }
+  /* ── CONTENT COLUMN ── */
+  .content-col { display: flex; flex-direction: column; gap: 1rem; }
 
   /* ── CARDS ── */
   .card {
-    background: #fff;
-    border-radius: 16px;
-    padding: 1.4rem;
+    background: #fff; border-radius: 16px; padding: 1.4rem;
     box-shadow: 0 1px 12px rgba(0,0,0,0.05);
   }
   .card h3 { font-size: 1rem; font-weight: 700; color: #0a2540; }
   .card-sub { font-size: 0.78rem; color: #94a3b8; margin-top: 0.1rem; }
-  .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1rem; }
+  .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
 
-  .content-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 1rem;
-    margin-bottom: 1rem;
+  /* ── PHASE BADGE ── */
+  .phase-badge {
+    padding: 0.3rem 0.75rem; border-radius: 20px;
+    font-size: 0.75rem; font-weight: 700; white-space: nowrap;
   }
+  .phase-badge.connected { background: #ede9fe; color: #7c3aed; }
+  .phase-badge.checking { background: #e0f2fe; color: #0284c7; }
 
-  /* ── CHART ── */
-  .chart-card { }
-  .chart-select {
-    border: 1.5px solid #e5e7eb;
-    border-radius: 8px;
-    padding: 0.3rem 0.6rem;
-    font-size: 0.78rem;
-    color: #374151;
-    outline: none;
-    cursor: pointer;
+  /* ── STATE BOXES ── */
+  .state-box {
+    display: flex; flex-direction: column; align-items: center;
+    padding: 1.5rem 1rem; gap: 0.6rem; text-align: center;
   }
-  .chart-wrap { overflow: hidden; }
-  .chart-wrap svg { width: 100%; height: auto; }
-  .chart-legend { font-size: 0.72rem; color: #94a3b8; margin-top: 0.5rem; display: flex; align-items: center; gap: 0.4rem; }
-  .legend-dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; display: inline-block; }
-  .link-btn { background: none; border: none; color: #0e7a8a; font-size: 0.8rem; font-weight: 600; cursor: pointer; }
+  .state-icon { font-size: 2.4rem; }
+  .state-title { font-size: 1rem; font-weight: 700; color: #0a2540; }
+  .state-desc { font-size: 0.84rem; color: #64748b; max-width: 360px; line-height: 1.5; }
 
-  /* ── ALERTS ── */
-  .alerts-list { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 1.2rem; }
-  .alert-item {
-    display: flex;
-    gap: 0.7rem;
-    padding: 0.7rem;
-    border-radius: 10px;
-    align-items: flex-start;
+  /* ── ACTION BUTTONS ── */
+  .btn-action {
+    margin-top: 0.75rem;
+    padding: 0.6rem 1.5rem;
+    border: none; border-radius: 10px;
+    font-size: 0.9rem; font-weight: 700; cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
   }
-  .alert-item.warning  { background: #fffbeb; }
-  .alert-item.info     { background: #f0f9ff; }
-  .alert-item.critical { background: #fef2f2; }
-  .alert-icon { font-size: 1rem; line-height: 1.2; }
-  .alert-msg { font-size: 0.82rem; color: #374151; font-weight: 500; }
-  .alert-time { font-size: 0.7rem; color: #94a3b8; }
+  .btn-action:active { transform: scale(0.97); }
+  .btn-connect { background: #0e7a8a; color: #fff; }
+  .btn-connect:hover { opacity: 0.9; }
+  .btn-start { background: #7c3aed; color: #fff; }
+  .btn-start:hover { opacity: 0.9; }
+  .btn-recheck { background: #0e7a8a; color: #fff; }
 
-  /* ── QUICK LOG ── */
-  .quick-log { border-top: 1px solid #f1f5f9; padding-top: 1rem; }
-  .quick-log h4 { font-size: 0.85rem; font-weight: 700; color: #374151; margin-bottom: 0.6rem; }
-  .log-row { display: flex; gap: 0.5rem; }
-  .log-input {
-    flex: 1;
-    padding: 0.5rem 0.7rem;
-    border: 1.5px solid #e5e7eb;
-    border-radius: 8px;
-    font-size: 0.8rem;
-    outline: none;
-    color: #0a2540;
-    min-width: 0;
+  /* ── PULSE ANIMATION ── */
+  .pulse-ring {
+    width: 90px; height: 90px; border-radius: 50%;
+    background: rgba(14,122,138,0.1);
+    display: flex; align-items: center; justify-content: center;
+    animation: pulse-out 1.5s ease-in-out infinite;
   }
-  .log-input:focus { border-color: #0e7a8a; }
-  .btn-log {
-    padding: 0.5rem 0.9rem;
-    background: linear-gradient(135deg,#0e7a8a,#12c4a0);
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    font-size: 0.8rem;
-    font-weight: 700;
-    cursor: pointer;
-    white-space: nowrap;
+  .pulse-core { font-size: 2rem; }
+  @keyframes pulse-out {
+    0%   { box-shadow: 0 0 0 0 rgba(14,122,138,0.4); }
+    70%  { box-shadow: 0 0 0 20px rgba(14,122,138,0); }
+    100% { box-shadow: 0 0 0 0 rgba(14,122,138,0); }
   }
 
-  /* ── BREATHING WIDGET ── */
-  .breath-widget {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 1.5rem 0;
-    gap: 1rem;
+  /* ── RESULT BOX ── */
+  .result-box {
+    display: flex; flex-direction: column; align-items: center;
+    padding: 1.5rem 1rem; gap: 0.5rem; border-radius: 12px; text-align: center;
   }
-  .breath-orb {
-    border-radius: 50%;
-    background: radial-gradient(circle, #12c4a0, #0e7a8a);
-    opacity: 0.8;
-    transition: width 4s ease-in-out, height 4s ease-in-out;
-    box-shadow: 0 0 30px rgba(18,196,160,0.3);
-  }
-  .breath-phase { font-size: 1rem; font-weight: 600; color: #374151; }
-  .breath-count { font-size: 0.8rem; color: #94a3b8; }
-  .btn-start {
-    padding: 0.55rem 1.4rem;
-    background: linear-gradient(135deg,#0e7a8a,#12c4a0);
-    color: #fff;
-    border: none;
-    border-radius: 10px;
-    font-size: 0.875rem;
-    font-weight: 700;
-    cursor: pointer;
+  .result-icon { font-size: 2.8rem; }
+  .result-label { font-size: 1.4rem; font-weight: 800; }
+  .result-desc { font-size: 0.88rem; opacity: 0.8; }
+  .done-actions { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.25rem; flex-wrap: wrap; justify-content: center; }
+  .saving-label { font-size: 0.8rem; color: #64748b; }
+
+  /* ── PILLS ── */
+  .pill-row { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-content: center; margin-top: 0.25rem; }
+  .count-pill {
+    padding: 0.28rem 0.75rem; border-radius: 20px;
+    font-size: 0.75rem; font-weight: 600;
   }
 
-  /* ── WEEKLY BARS ── */
-  .weekly-bars {
-    display: flex;
-    gap: 0.5rem;
-    align-items: flex-end;
-    height: 100px;
-    margin: 1rem 0;
+  /* ── HISTORY ── */
+  .history-list { display: flex; flex-direction: column; gap: 0.6rem; }
+  .history-item {
+    display: flex; align-items: flex-start; gap: 0.75rem;
+    padding: 0.85rem 1rem; border-radius: 10px; background: #f8fafc;
+    border-left: 4px solid #e5e7eb;
   }
-  .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 0.3rem; height: 100%; }
-  .bar-val { font-size: 0.65rem; color: #0e7a8a; font-weight: 700; }
-  .bar-track { flex: 1; width: 100%; background: #f1f5f9; border-radius: 6px; overflow: hidden; display: flex; align-items: flex-end; }
-  .bar-fill { width: 100%; background: linear-gradient(to top, #0e7a8a, #12c4a0); border-radius: 6px; transition: height 0.5s; }
-  .bar-label { font-size: 0.65rem; color: #94a3b8; }
-
-  .summary-footer {
-    display: flex;
-    gap: 0.5rem;
-    padding-top: 0.75rem;
-    border-top: 1px solid #f1f5f9;
+  .history-icon { font-size: 1.3rem; flex-shrink: 0; margin-top: 0.1rem; }
+  .history-info { flex: 1; min-width: 0; }
+  .history-status { display: block; font-size: 0.88rem; font-weight: 700; }
+  .history-desc { display: block; font-size: 0.75rem; color: #94a3b8; margin-top: 0.1rem; }
+  .history-pills { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.4rem; }
+  .mini-pill {
+    padding: 0.15rem 0.5rem; border-radius: 20px;
+    font-size: 0.68rem; font-weight: 600;
   }
-  .sf-item { flex: 1; text-align: center; }
-  .sf-item span { display: block; font-size: 0.7rem; color: #94a3b8; margin-bottom: 0.2rem; }
-  .sf-item strong { font-size: 0.95rem; color: #0a2540; }
-
-  /* ── MOBILE ── */
-  .sidebar-overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.4);
-    z-index: 99;
+  .history-time-block {
+    display: flex; flex-direction: column; align-items: flex-end;
+    gap: 0.1rem; flex-shrink: 0; margin-left: auto;
   }
+  .history-date { font-size: 0.72rem; color: #64748b; white-space: nowrap; }
+  .history-time { font-size: 0.78rem; font-weight: 600; color: #0a2540; white-space: nowrap; }
 
-  @media (max-width: 900px) {
-    .content-row { grid-template-columns: 1fr; }
+  /* ── EMPTY STATE ── */
+  .empty-state {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 0.4rem; padding: 2rem 1rem; text-align: center;
+    color: #94a3b8; font-size: 0.85rem;
   }
+  .empty-icon { font-size: 2rem; }
 
+  /* ── OVERLAY ── */
+  .sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 99; }
+
+  /* ── RESPONSIVE ── */
   @media (max-width: 768px) {
     .sidebar { transform: translateX(-100%); }
     .sidebar.open { transform: translateX(0); }
     .sidebar-overlay { display: block; }
     .hamburger { display: block; }
     .db-main { margin-left: 0; padding: 1rem; }
-    .metrics-grid { grid-template-columns: 1fr 1fr; }
-    .content-row { grid-template-columns: 1fr; }
-    .header-title {
-        display: flex;
-        flex-direction: column;
-        line-height: 1.15;
-    }
-
-    .greeting-name {
-        display: block;
-    }
+    .card { padding: 1.1rem; }
+    .card h3 { font-size: 0.95rem; }
+    .state-box { padding: 1.25rem 0.5rem; }
+    .state-desc { font-size: 0.8rem; }
+    .btn-action { padding: 0.55rem 1.2rem; font-size: 0.85rem; }
+    .history-item { padding: 0.75rem 0.85rem; }
+    .result-label { font-size: 1.2rem; }
+    .history-pills { display: none; }
   }
 
   @media (max-width: 400px) {
-    .metrics-grid { grid-template-columns: 1fr; }
-    .log-row { flex-wrap: wrap; }
-    .btn-log { width: 100%; }
+    .db-main { padding: 0.75rem; }
+    .card { padding: 1rem 0.9rem; border-radius: 12px; }
+    .pill-row { gap: 0.3rem; }
+    .count-pill { font-size: 0.7rem; padding: 0.22rem 0.6rem; }
+    .phase-badge { font-size: 0.7rem; padding: 0.25rem 0.6rem; }
+    .history-date {
+        display: block;
+        font-size: 0.68rem;
+    }
+
+    .history-time-block {
+        align-items: flex-end;
+    }
   }
 `;
