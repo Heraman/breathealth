@@ -276,7 +276,7 @@ export default function Dashboard() {
           </div>
 
           {/* ── Quick Stats Card ── */}
-          <div className="card">
+          {/* <div className="card">
             <div className="card-header">
               <div>
                 <h3>📊 Ringkasan</h3>
@@ -302,7 +302,7 @@ export default function Dashboard() {
                 <button className="stat-link" onClick={() => navigate("/history")}>Lihat →</button>
               </div>
             </div>
-          </div>
+          </div> */}
 
         </section>
       </main>
