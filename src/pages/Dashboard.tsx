@@ -472,7 +472,15 @@ const styles = `
   }
   .result-icon { font-size: 3.5rem; margin-bottom: 0.25rem; }
   .result-label { font-size: 1rem; font-weight: 600; line-height: 1.5; max-width: 320px; }
-  .done-actions { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.5rem; flex-wrap: wrap; justify-content: center; }
+  .done-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+    flex-wrap: wrap;
+    justify-content: center;
+    width: 100%;
+    }
   .saving-label { font-size: 0.8rem; color: #64748b; }
 
   /* ── STATS GRID ── */
@@ -501,6 +509,16 @@ const styles = `
     .btn-action { padding: 0.55rem 1.2rem; font-size: 0.85rem; }
     .stats-grid { grid-template-columns: repeat(3, 1fr); gap: 0.5rem; }
     .result-label { font-size: 0.9rem; }
+    .done-actions {
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .done-actions .btn-action {
+        width: 100%;
+        max-width: 260px;
+        display: block;
+    }
   }
 
   @media (max-width: 400px) {
