@@ -10,11 +10,11 @@ let activeCharacteristic: BluetoothRemoteGATTCharacteristic | null = null;
  * Putuskan koneksi Bluetooth aktif dan reset semua referensi.
  * Aman dipanggil meski belum ada koneksi (no-op).
  */
-export function disconnectBreathDevice() {
+export async function disconnectBreathDevice() {
   // Hentikan notifikasi dulu sebelum disconnect agar tidak error
   if (activeCharacteristic) {
     try {
-      activeCharacteristic.stopNotifications();
+      await activeCharacteristic.stopNotifications();
     } catch (_) {
       // Abaikan error jika sudah tidak terhubung
     }
@@ -54,7 +54,7 @@ export async function connectBreathDevice(
 
   // Putuskan koneksi lama dulu jika masih ada
   // Ini mencegah error "GATT operation already in progress"
-  disconnectBreathDevice();
+  await disconnectBreathDevice();
 
   const device = await navigator.bluetooth.requestDevice({
     filters: [{ namePrefix: "SmartBreathprint" }],
