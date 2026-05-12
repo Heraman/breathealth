@@ -2,7 +2,8 @@ const SERVICE_UUID = "12345678-1234-1234-1234-1234567890ab";
 const CHAR_UUID = "abcd1234-5678-1234-5678-abcdef123456";
 
 export async function connectBreathDevice(
-  onData: (value: string) => void
+  onData: (value: string) => void,
+  onDisconnect: () => void
 ) {
   if (!navigator.bluetooth) {
     throw new Error("Web Bluetooth tidak support di browser ini");
@@ -17,6 +18,10 @@ export async function connectBreathDevice(
     optionalServices: [SERVICE_UUID],
   });
 
+  device.addEventListener('gattserverdisconnected', () => {
+    console.log("Device disconnected!");
+    onDisconnect(); // Beritahu React kalau koneksi putus
+  });
   const server = await device.gatt?.connect();
   if (!server) throw new Error("Gagal connect ke GATT server");
 

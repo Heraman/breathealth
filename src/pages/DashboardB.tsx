@@ -4,9 +4,6 @@ import { useNavigate } from "react-router-dom";
 import {
   collection,
   addDoc,
-  query,
-  orderBy,
-  onSnapshot,
   Timestamp,
 } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
@@ -15,13 +12,6 @@ import { connectBreathDevice } from "../lib/ble";
 // ─── Types ───────────────────────────────────────────────────────────────────
 type BreathStatus = "Mild" | "Normal" | "Stressed" | "Weak";
 type CheckPhase = "idle" | "connected" | "checking" | "done";
-
-interface HistoryEntry {
-  id?: string;
-  status: BreathStatus;
-  timestamp: Timestamp | Date;
-  counts: Record<BreathStatus, number>;
-}
 
 const VALID_STATUSES: BreathStatus[] = ["Mild", "Normal", "Stressed", "Weak"];
 
@@ -34,23 +24,11 @@ const STATUS_CONFIG: Record<BreathStatus, { color: string; bg: string; icon: str
 
 // ─── Sidebar nav ──────────────────────────────────────────────────────────────
 const NAV = [
-  { icon: "⊡",  label: "Dashboard",  id: "dashboard" },
-  { icon: "📈", label: "Monitoring", id: "monitoring" },
-  { icon: "📋", label: "Reports",    id: "reports" },
-  { icon: "💊", label: "Medication", id: "medication" },
-  { icon: "📅", label: "Schedule",   id: "schedule" },
-  { icon: "⚙️", label: "Settings",   id: "settings" },
+  { icon: "📈",  label: "Dashboard",  id: "dashboard" },
+  { icon: "📋", label: "History",    id: "history" },
 ];
 
 const CHECK_DURATION = 10000;
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-function formatTimestamp(ts: Timestamp | Date): { date: string; time: string } {
-  const d = ts instanceof Date ? ts : ts.toDate();
-  const date = d.toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" });
-  const time = d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
-  return { date, time };
-}
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -69,6 +47,16 @@ export default function Dashboard() {
     navigate("/login");
   };
 
+  // Navigate to history page when History nav is clicked
+  const handleNavClick = (id: string) => {
+    if (id === "history") {
+      navigate("/history");
+    } else {
+      setActiveNav(id);
+    }
+    setSidebarOpen(false);
+  };
+
   const firstName = user?.displayName?.split(" ")[0] ?? "User";
   const greeting = now.getHours() < 12 ? "Pagi" : now.getHours() < 17 ? "Sore" : "Malam";
 
@@ -76,30 +64,11 @@ export default function Dashboard() {
   const [phase, setPhase] = useState<CheckPhase>("idle");
   const [countdown, setCountdown] = useState(0);
   const [finalResult, setFinalResult] = useState<BreathStatus | null>(null);
-  const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [saving, setSaving] = useState(false);
 
   const countRef = useRef<Record<BreathStatus, number>>({ Mild: 0, Normal: 0, Stressed: 0, Weak: 0 });
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // ─── Firebase: Load history realtime ─────────────────────────────────────────
-  useEffect(() => {
-    if (!user) return;
-    const uid = user.uid;
-    const q = query(
-      collection(db, "users", uid, "checkHistory"),
-      orderBy("timestamp", "desc")
-    );
-    const unsub = onSnapshot(q, (snap) => {
-      const entries: HistoryEntry[] = snap.docs.map((doc) => ({
-        id: doc.id,
-        ...(doc.data() as Omit<HistoryEntry, "id">),
-      }));
-      setHistory(entries);
-    });
-    return () => unsub();
-  }, [user]);
 
   // ─── Connect BLE ─────────────────────────────────────────────────────────────
   const handleConnect = async () => {
@@ -182,7 +151,7 @@ export default function Dashboard() {
       <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div className="sidebar-brand">
           <span className="brand-icon">🫁</span>
-          <span className="brand-name">BreaHealth</span>
+          <span className="brand-name">BreatHealth</span>
         </div>
 
         <nav className="sidebar-nav">
@@ -190,7 +159,7 @@ export default function Dashboard() {
             <button
               key={n.id}
               className={`nav-item ${activeNav === n.id ? "active" : ""}`}
-              onClick={() => { setActiveNav(n.id); setSidebarOpen(false); }}
+              onClick={() => handleNavClick(n.id)}
             >
               <span className="nav-icon">{n.icon}</span>
               <span className="nav-label">{n.label}</span>
@@ -240,20 +209,12 @@ export default function Dashboard() {
                 <p className="card-sub">SmartBreathprint via Bluetooth</p>
               </div>
 
-              {/* Status badge di header card */}
+              {/* Status badge di header card - hanya tampil connected & checking */}
               {phase === "connected" && (
                 <span className="phase-badge connected">● Terhubung</span>
               )}
               {phase === "checking" && (
                 <span className="phase-badge checking">⏳ {countdown}s</span>
-              )}
-              {phase === "done" && finalResult && (
-                <span
-                  className="phase-badge"
-                  style={{ background: STATUS_CONFIG[finalResult].bg, color: STATUS_CONFIG[finalResult].color }}
-                >
-                  ● {finalResult}
-                </span>
               )}
             </div>
 
@@ -283,7 +244,7 @@ export default function Dashboard() {
               </div>
             )}
 
-            {/* State: Checking */}
+            {/* State: Checking - tanpa pills status */}
             {phase === "checking" && (
               <div className="state-box">
                 <div className="pulse-ring">
@@ -291,110 +252,57 @@ export default function Dashboard() {
                 </div>
                 <p className="state-title" style={{ color: "#0e7a8a" }}>Sedang Menganalisis...</p>
                 <p className="state-desc">Bernapaslah normal. Selesai dalam <strong>{countdown} detik</strong>.</p>
-                <div className="pill-row">
-                  {(["Normal", "Mild", "Stressed", "Weak"] as BreathStatus[]).map((s) => (
-                    <div key={s} className="count-pill" style={{ background: STATUS_CONFIG[s].bg, color: STATUS_CONFIG[s].color }}>
-                      {s}: {countRef.current[s]}x
-                    </div>
-                  ))}
-                </div>
               </div>
             )}
 
-            {/* State: Done */}
+            {/* State: Done - hanya tampil result akhir, tanpa pills breakdown */}
             {phase === "done" && finalResult && (
               <div className="result-box" style={{ background: STATUS_CONFIG[finalResult].bg }}>
                 <div className="result-icon">{STATUS_CONFIG[finalResult].icon}</div>
                 <div className="result-label" style={{ color: STATUS_CONFIG[finalResult].color }}>
-                  Hasil: {finalResult}
-                </div>
-                <p className="result-desc" style={{ color: STATUS_CONFIG[finalResult].color }}>
                   {STATUS_CONFIG[finalResult].desc}
-                </p>
-                <div className="pill-row" style={{ marginTop: "1rem" }}>
-                  {(["Normal", "Mild", "Stressed", "Weak"] as BreathStatus[]).map((s) => (
-                    <div
-                      key={s}
-                      className="count-pill"
-                      style={{
-                        background: s === finalResult ? STATUS_CONFIG[s].color : "#f1f5f9",
-                        color: s === finalResult ? "#fff" : "#64748b",
-                        fontWeight: s === finalResult ? 800 : 500,
-                      }}
-                    >
-                      {s}: {countRef.current[s]}x
-                    </div>
-                  ))}
                 </div>
                 <div className="done-actions">
                   {saving && <span className="saving-label">💾 Menyimpan...</span>}
                   <button className="btn-action btn-recheck" onClick={handleRecheck}>
                     🔄 Cek Ulang
                   </button>
+                  <button className="btn-action btn-history" onClick={() => navigate("/history")}>
+                    📋 Lihat Riwayat
+                  </button>
                 </div>
               </div>
             )}
           </div>
 
-          {/* ── History Card ── */}
-          <div className="card">
+          {/* ── Quick Stats Card ── */}
+          {/* <div className="card">
             <div className="card-header">
               <div>
-                <h3>📋 Riwayat Pengecekan</h3>
-                <p className="card-sub">
-                  {history.length === 0 ? "Belum ada data" : `${history.length} hasil tersimpan`}
-                </p>
+                <h3>📊 Ringkasan</h3>
+                <p className="card-sub">Pantau kesehatan pernapasanmu</p>
               </div>
             </div>
-
-            {history.length === 0 ? (
-              <div className="empty-state">
-                <span className="empty-icon">📭</span>
-                <p>Belum ada riwayat pengecekan.</p>
-                <p>Data akan muncul setelah pemeriksaan pertama.</p>
+            <div className="stats-grid">
+              <div className="stat-item">
+                <span className="stat-icon">🫁</span>
+                <p className="stat-label">Pengecekan Hari Ini</p>
+                <p className="stat-value">—</p>
               </div>
-            ) : (
-              <div className="history-list">
-                {history.map((h, i) => {
-                  const { date, time } = formatTimestamp(h.timestamp);
-                  return (
-                    <div
-                      key={h.id ?? i}
-                      className="history-item"
-                      style={{ borderLeft: `4px solid ${STATUS_CONFIG[h.status].color}` }}
-                    >
-                      <span className="history-icon">{STATUS_CONFIG[h.status].icon}</span>
-                      <div className="history-info">
-                        <span className="history-status" style={{ color: STATUS_CONFIG[h.status].color }}>
-                          {h.status}
-                        </span>
-                        <span className="history-desc">{STATUS_CONFIG[h.status].desc}</span>
-                        {h.counts && (
-                          <div className="history-pills">
-                            {(["Normal", "Mild", "Stressed", "Weak"] as BreathStatus[]).map((s) => (
-                              h.counts[s] > 0 && (
-                                <span
-                                  key={s}
-                                  className="mini-pill"
-                                  style={{ background: STATUS_CONFIG[s].bg, color: STATUS_CONFIG[s].color }}
-                                >
-                                  {s}: {h.counts[s]}x
-                                </span>
-                              )
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                      <div className="history-time-block">
-                        <span className="history-date">{date}</span>
-                        <span className="history-time">{time}</span>
-                      </div>
-                    </div>
-                  );
-                })}
+              <div className="stat-item">
+                <span className="stat-icon">✅</span>
+                <p className="stat-label">Status Terakhir</p>
+                <p className="stat-value" style={{ color: finalResult ? STATUS_CONFIG[finalResult].color : "#94a3b8" }}>
+                  {finalResult ? STATUS_CONFIG[finalResult].icon + " " + finalResult : "—"}
+                </p>
               </div>
-            )}
-          </div>
+              <div className="stat-item">
+                <span className="stat-icon">📅</span>
+                <p className="stat-label">Riwayat Lengkap</p>
+                <button className="stat-link" onClick={() => navigate("/history")}>Lihat →</button>
+              </div>
+            </div>
+          </div> */}
 
         </section>
       </main>
@@ -516,6 +424,8 @@ const styles = `
   .btn-start { background: #7c3aed; color: #fff; }
   .btn-start:hover { opacity: 0.9; }
   .btn-recheck { background: #0e7a8a; color: #fff; }
+  .btn-history { background: #f1f5f9; color: #0a2540; border: 1px solid #e2e8f0; margin-top: 0.75rem; }
+  .btn-history:hover { background: #e2e8f0; }
 
   /* ── PULSE ANIMATION ── */
   .pulse-ring {
@@ -534,51 +444,21 @@ const styles = `
   /* ── RESULT BOX ── */
   .result-box {
     display: flex; flex-direction: column; align-items: center;
-    padding: 1.5rem 1rem; gap: 0.5rem; border-radius: 12px; text-align: center;
+    padding: 2rem 1rem; gap: 0.5rem; border-radius: 12px; text-align: center;
   }
-  .result-icon { font-size: 2.8rem; }
-  .result-label { font-size: 1.4rem; font-weight: 800; }
-  .result-desc { font-size: 0.88rem; opacity: 0.8; }
-  .done-actions { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.25rem; flex-wrap: wrap; justify-content: center; }
+  .result-icon { font-size: 3.5rem; margin-bottom: 0.25rem; }
+  .result-label { font-size: 1rem; font-weight: 600; line-height: 1.5; max-width: 320px; }
+  .done-actions { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.5rem; flex-wrap: wrap; justify-content: center; }
   .saving-label { font-size: 0.8rem; color: #64748b; }
 
-  /* ── PILLS ── */
-  .pill-row { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-content: center; margin-top: 0.25rem; }
-  .count-pill {
-    padding: 0.28rem 0.75rem; border-radius: 20px;
-    font-size: 0.75rem; font-weight: 600;
-  }
-
-  /* ── HISTORY ── */
-  .history-list { display: flex; flex-direction: column; gap: 0.6rem; }
-  .history-item {
-    display: flex; align-items: flex-start; gap: 0.75rem;
-    padding: 0.85rem 1rem; border-radius: 10px; background: #f8fafc;
-    border-left: 4px solid #e5e7eb;
-  }
-  .history-icon { font-size: 1.3rem; flex-shrink: 0; margin-top: 0.1rem; }
-  .history-info { flex: 1; min-width: 0; }
-  .history-status { display: block; font-size: 0.88rem; font-weight: 700; }
-  .history-desc { display: block; font-size: 0.75rem; color: #94a3b8; margin-top: 0.1rem; }
-  .history-pills { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.4rem; }
-  .mini-pill {
-    padding: 0.15rem 0.5rem; border-radius: 20px;
-    font-size: 0.68rem; font-weight: 600;
-  }
-  .history-time-block {
-    display: flex; flex-direction: column; align-items: flex-end;
-    gap: 0.1rem; flex-shrink: 0; margin-left: auto;
-  }
-  .history-date { font-size: 0.72rem; color: #64748b; white-space: nowrap; }
-  .history-time { font-size: 0.78rem; font-weight: 600; color: #0a2540; white-space: nowrap; }
-
-  /* ── EMPTY STATE ── */
-  .empty-state {
-    display: flex; flex-direction: column; align-items: center;
-    gap: 0.4rem; padding: 2rem 1rem; text-align: center;
-    color: #94a3b8; font-size: 0.85rem;
-  }
-  .empty-icon { font-size: 2rem; }
+  /* ── STATS GRID ── */
+  .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+  .stat-item { display: flex; flex-direction: column; align-items: center; gap: 0.3rem; text-align: center; padding: 0.75rem 0.5rem; background: #f8fafc; border-radius: 10px; }
+  .stat-icon { font-size: 1.5rem; }
+  .stat-label { font-size: 0.72rem; color: #94a3b8; font-weight: 500; }
+  .stat-value { font-size: 0.88rem; font-weight: 700; color: #0a2540; }
+  .stat-link { background: none; border: none; color: #0e7a8a; font-size: 0.82rem; font-weight: 700; cursor: pointer; padding: 0; }
+  .stat-link:hover { text-decoration: underline; }
 
   /* ── OVERLAY ── */
   .sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 99; }
@@ -595,24 +475,14 @@ const styles = `
     .state-box { padding: 1.25rem 0.5rem; }
     .state-desc { font-size: 0.8rem; }
     .btn-action { padding: 0.55rem 1.2rem; font-size: 0.85rem; }
-    .history-item { padding: 0.75rem 0.85rem; }
-    .result-label { font-size: 1.2rem; }
-    .history-pills { display: none; }
+    .stats-grid { grid-template-columns: repeat(3, 1fr); gap: 0.5rem; }
+    .result-label { font-size: 0.9rem; }
   }
 
   @media (max-width: 400px) {
     .db-main { padding: 0.75rem; }
     .card { padding: 1rem 0.9rem; border-radius: 12px; }
-    .pill-row { gap: 0.3rem; }
-    .count-pill { font-size: 0.7rem; padding: 0.22rem 0.6rem; }
+    .stats-grid { grid-template-columns: repeat(3, 1fr); }
     .phase-badge { font-size: 0.7rem; padding: 0.25rem 0.6rem; }
-    .history-date {
-        display: block;
-        font-size: 0.68rem;
-    }
-
-    .history-time-block {
-        align-items: flex-end;
-    }
   }
 `;

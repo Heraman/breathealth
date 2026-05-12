@@ -7,7 +7,7 @@ import {
   Timestamp,
 } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
-import { connectBreathDevice } from "../lib/ble";
+import { connectBreathDevice, disconnectBreathDevice } from "../lib/ble";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type BreathStatus = "Mild" | "Normal" | "Stressed" | "Weak";
@@ -75,17 +75,31 @@ export default function Dashboard() {
     if (phase !== "idle") return;
     try {
       setPhase("connected");
-      await connectBreathDevice((dataStr) => {
-        const trimmed = dataStr.trim() as BreathStatus;
-        if (VALID_STATUSES.includes(trimmed)) {
-          countRef.current[trimmed]++;
-        }
-      });
+      await connectBreathDevice(
+        (dataStr) => {
+          const trimmed = dataStr.trim() as BreathStatus;
+          if (VALID_STATUSES.includes(trimmed)) {
+            countRef.current[trimmed]++;
+          }
+        },
+        handleDisconnect // otomatis kembali ke idle jika device tiba-tiba lepas
+      );
     } catch (error: any) {
       console.error(error);
       setPhase("idle");
       alert(error.message);
     }
+  };
+
+  // ─── Disconnect BLE ──────────────────────────────────────────────────────────
+  const handleDisconnect = () => {
+    // Hentikan timer & countdown jika sedang berjalan
+    if (timerRef.current) clearTimeout(timerRef.current);
+    if (countdownRef.current) clearInterval(countdownRef.current);
+    disconnectBreathDevice();
+    setPhase("idle");
+    setFinalResult(null);
+    setCountdown(0);
   };
 
   // ─── Mulai Pengecekan ─────────────────────────────────────────────────────────
@@ -142,6 +156,7 @@ export default function Dashboard() {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
       if (countdownRef.current) clearInterval(countdownRef.current);
+      disconnectBreathDevice(); // cleanup saat component unmount
     };
   }, []);
 
@@ -238,9 +253,14 @@ export default function Dashboard() {
                 <p className="state-desc">
                   Tekan <strong>Mulai Pengecekan</strong> lalu bernapaslah secara normal selama {CHECK_DURATION / 1000} detik.
                 </p>
-                <button className="btn-action btn-start" onClick={handleStartCheck}>
-                  ▶ Mulai Pengecekan
-                </button>
+                <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", justifyContent: "center" }}>
+                  <button className="btn-action btn-start" onClick={handleStartCheck}>
+                    ▶ Mulai Pengecekan
+                  </button>
+                  <button className="btn-action btn-disconnect" onClick={handleDisconnect}>
+                    🔌 Disconnect
+                  </button>
+                </div>
               </div>
             )}
 
@@ -424,6 +444,8 @@ const styles = `
   .btn-start { background: #7c3aed; color: #fff; }
   .btn-start:hover { opacity: 0.9; }
   .btn-recheck { background: #0e7a8a; color: #fff; }
+  .btn-disconnect { background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5; }
+  .btn-disconnect:hover { background: #fecaca; }
   .btn-history { background: #f1f5f9; color: #0a2540; border: 1px solid #e2e8f0; margin-top: 0.75rem; }
   .btn-history:hover { background: #e2e8f0; }
 
