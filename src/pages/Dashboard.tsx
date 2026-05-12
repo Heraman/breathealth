@@ -70,6 +70,16 @@ export default function Dashboard() {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // ─── Disconnect BLE ──────────────────────────────────────────────────────────
+  const handleDisconnect = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    if (countdownRef.current) clearInterval(countdownRef.current);
+    disconnectBreathDevice();
+    setPhase("idle");
+    setFinalResult(null);
+    setCountdown(0);
+  };
+
   // ─── Connect BLE ─────────────────────────────────────────────────────────────
   const handleConnect = async () => {
     if (phase !== "idle") return;
@@ -82,24 +92,13 @@ export default function Dashboard() {
             countRef.current[trimmed]++;
           }
         },
-        handleDisconnect // otomatis kembali ke idle jika device tiba-tiba lepas
+        handleDisconnect
       );
     } catch (error: any) {
       console.error(error);
       setPhase("idle");
       alert(error.message);
     }
-  };
-
-  // ─── Disconnect BLE ──────────────────────────────────────────────────────────
-  const handleDisconnect = () => {
-    // Hentikan timer & countdown jika sedang berjalan
-    if (timerRef.current) clearTimeout(timerRef.current);
-    if (countdownRef.current) clearInterval(countdownRef.current);
-    disconnectBreathDevice();
-    setPhase("idle");
-    setFinalResult(null);
-    setCountdown(0);
   };
 
   // ─── Mulai Pengecekan ─────────────────────────────────────────────────────────
