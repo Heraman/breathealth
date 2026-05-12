@@ -289,6 +289,9 @@ export default function Dashboard() {
                   <button className="btn-action btn-history" onClick={() => navigate("/history")}>
                     📋 Lihat Riwayat
                   </button>
+                  <button className="btn-action btn-disconnect" onClick={handleDisconnect}>
+                    🔌 Disconnect
+                  </button>
                 </div>
               </div>
             )}
